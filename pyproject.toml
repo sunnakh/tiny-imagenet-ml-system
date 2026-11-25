@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiny-imagenet-project"
+version = "0.1.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "datasets>=4,<6",
+    "mlflow>=3,<4",
+    "numpy>=2,<3",
+    "pillow>=11,<14",
+    "pyarrow>=18,<27",
+    "scikit-learn>=1.6,<2",
+    "torch>=2.7,<3",
+]
+
+[project.optional-dependencies]
+dev = ["ruff<1", "mypy<3"]
+
+[tool.setuptools.packages.find]
+include = ["tiny_imagenet*"]
+
+[tool.ruff]
+target-version = "py312"
+include = ["tiny_imagenet/**/*.py", "tests/**/*.py"]
+extend-exclude = ["notebooks", "*.ipynb"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["tiny_imagenet"]
+ignore_missing_imports = true

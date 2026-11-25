@@ -1,0 +1,6 @@
+**
+!pyproject.toml
+!tiny_imagenet/
+!tiny_imagenet/*.py
+!release/
+!release/**
