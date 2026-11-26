@@ -1,6 +1,6 @@
 # Tiny ImageNet classification
 
-This project proposes a class for a 64 × 64 image so a reviewer can confirm or correct the label. A residual CNN trains from scratch on Tiny ImageNet. Release decisions use an internal holdout and a majority-class baseline. The homework notebook retains its original code and outputs. [Project requirements](docs/requirements.md) · [Homework 2 guidelines](docs/homework-guidelines.md) · [tiny-imagenet-classifier.ipynb](notebooks/tiny-imagenet-classifier.ipynb)
+This project proposes a class for a 64 × 64 image so a reviewer can confirm or correct the label. A residual CNN trains from scratch on Tiny ImageNet. Release decisions use an internal holdout and a majority-class baseline. The research notebook keeps its original code and outputs. [Project requirements](docs/requirements.md) · [System design](docs/design.md) · [tiny-imagenet-classifier.ipynb](notebooks/tiny-imagenet-classifier.ipynb)
 
 ```mermaid
 flowchart LR
@@ -63,6 +63,6 @@ curl -fsS -H 'Content-Type: application/octet-stream' \
 | Local HTTP latency | 9.3 ms p95 over 50 sequential warmed requests against the synthetic fixture, with a 250 ms target |
 | Local Docker image | Health, prediction, and metrics endpoints passed. The synthetic fixture served 10 warmed requests at 24.8 ms p95. |
 
-The saved homework log shows **51.11% internal tuning accuracy at epoch 75** of a run configured for 80 epochs. The project uses a different holdout and release gate. The smoke and fixture results above verify the pipeline at reduced scale. A full-data project model requires a fresh training and evaluation run. [Homework training log](notebooks/tiny-imagenet-classifier.ipynb)
+The saved notebook log shows **51.11% internal tuning accuracy at epoch 75** of a run configured for 80 epochs. The project uses a different holdout and release gate. The smoke and fixture results above verify the pipeline at reduced scale. A full-data project model requires a fresh training and evaluation run. [Notebook training log](notebooks/tiny-imagenet-classifier.ipynb)
 
 The release gate is a point-estimate comparison on a fixed holdout. Repeated tuning against the gate reduces its value as independent evidence. Monitoring uses local SQLite and measures quality on the subset of requests with feedback, which can be biased. Cloud demo telemetry lasts for the life of the instance. Local p95 describes the documented warmed serial workload.
