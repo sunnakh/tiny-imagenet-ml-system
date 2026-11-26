@@ -13,10 +13,11 @@ from typing import Any
 
 import torch
 from PIL import Image
+from prometheus_client import CONTENT_TYPE_LATEST
 
 from .data import read_image, tensor_image
 from .model import TinyCNN
-from .monitor import Monitor
+from .monitor import Monitor, prometheus_metrics
 from .release import bundle_path, metadata_for, releases, validate_weights
 from .training import load_model
 
@@ -124,6 +125,12 @@ class App:
             "label": label,
         }
 
+    def ready(self, release_id: str | None) -> bool:
+        return (
+            release_id is not None
+            and (bundle_path(self.root, release_id) / "weights.pt").is_file()
+        )
+
     def report(self) -> dict:
         pointers = releases(self.root)
         release_id = pointers["active"]
@@ -160,15 +167,19 @@ def serve(root: Path, host: str, port: int, timeout_ms: float) -> None:
             super().setup()
             self.connection.settimeout(5)
 
-        def send(self, status: int, body: dict | str) -> None:
-            data = (json.dumps(body) if isinstance(body, dict) else body).encode()
+        def send(
+            self, status: int, body: dict | str | bytes, content_type: str | None = None
+        ) -> None:
+            if isinstance(body, dict):
+                data = json.dumps(body).encode()
+                content_type = "application/json"
+            elif isinstance(body, str):
+                data = body.encode()
+                content_type = "text/html; charset=utf-8"
+            else:
+                data = body
             self.send_response(status)
-            self.send_header(
-                "Content-Type",
-                "application/json"
-                if isinstance(body, dict)
-                else "text/html; charset=utf-8",
-            )
+            self.send_header("Content-Type", content_type or "application/octet-stream")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -176,19 +187,23 @@ def serve(root: Path, host: str, port: int, timeout_ms: float) -> None:
         def do_GET(self) -> None:
             if self.path == "/health":
                 active = releases(root)["active"]
-                ready = (
-                    active is not None
-                    and (bundle_path(root, active) / "weights.pt").is_file()
-                )
+                ready = app.ready(active)
                 self.send(200 if ready else 503, {"ready": ready, "release_id": active})
             elif self.path == "/metrics":
                 self.send(200, app.report())
+            elif self.path == "/metrics/prometheus":
+                report = app.report()
+                self.send(
+                    200,
+                    prometheus_metrics(report, app.ready(report["release_id"])),
+                    CONTENT_TYPE_LATEST,
+                )
             elif self.path == "/dashboard":
-                report = html.escape(json.dumps(app.report(), indent=2))
+                html_report = html.escape(json.dumps(app.report(), indent=2))
                 self.send(
                     200,
                     f"<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=10>"
-                    f"<title>Tiny ImageNet service</title><h1>Tiny ImageNet service</h1><pre>{report}</pre>",
+                    f"<title>Tiny ImageNet service</title><h1>Tiny ImageNet service</h1><pre>{html_report}</pre>",
                 )
             else:
                 self.send(404, {"error": "unknown endpoint"})
