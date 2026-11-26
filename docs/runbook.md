@@ -43,7 +43,7 @@ Run both client-side latency workloads:
 .venv/bin/python -m tiny_imagenet.load_test --url http://127.0.0.1:18080 --requests 100 --concurrency 4
 ```
 
-The 250 ms target applies to the sequential workload with zero fallbacks. For the concurrent workload, use both active-response p95 and the fallback rate. The service has one inference slot. A request that arrives while the slot is busy can immediately abstain with HTTP 503.
+The 250 ms target applies to the sequential workload with zero fallbacks. For the concurrent workload, use both active-response p95 and the fallback rate. The active worker runs one prediction at a time and allows up to three waiting requests. Queue time counts toward the inference timeout. When the queue is full or the deadline expires, the service abstains with HTTP 503.
 
 For a local incident drill, temporarily rename the active `weights.pt` inside the disposable export, send a prediction, and verify HTTP 503. Restore the file and verify HTTP 200. Follow the notifications with:
 
