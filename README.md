@@ -62,6 +62,8 @@ curl -fsS -H 'Content-Type: application/octet-stream' \
 | Synthetic fixture | 75.00% gate accuracy and 66.67% macro F1 on 16 synthetic gate images |
 | Local HTTP latency | 9.3 ms p95 over 50 sequential warmed requests against the synthetic fixture, with a 250 ms target |
 | Local Docker image | Health, prediction, and metrics endpoints passed. The synthetic fixture served 10 warmed requests at 24.8 ms p95. |
+| Fresh clone, one command | `make demo` on a clean clone of commit `80b4e31` installed, trained, registered and served the synthetic fixture in about 155 s. 50 warmed requests ran at 4.0 ms p95. Removing the weights returned HTTP 503 fallback and raised `fallback_rate_high`. The served model recorded its Git commit, data version, MLflow run and registry version. |
+| Continuous integration | GitHub Actions runs Ruff, mypy and the test suite on every pull request and every push to `main`. |
 
 The saved notebook log shows **51.11% internal tuning accuracy at epoch 75** of a run configured for 80 epochs. The project uses a different holdout and release gate. The smoke and fixture results above verify the pipeline at reduced scale. A full-data project model requires a fresh training and evaluation run. [Notebook training log](notebooks/tiny-imagenet-classifier.ipynb)
 
