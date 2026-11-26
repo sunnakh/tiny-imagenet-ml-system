@@ -69,14 +69,15 @@ flowchart TB
         API["HTTP API<br/>/predict /feedback /health"]:::done
         FB["Fallback: HTTP 503 abstain<br/>missing, busy, timeout, error"]:::done
         SH["Shadow inference, async"]:::done
-        LT["Load test: 50 serial warmed<br/>p95 ≤ 250 ms"]:::partial
+        LT["Smoke HTTP: serial and concurrent<br/>full-model load pending"]:::partial
     end
 
     subgraph S6["6 · Monitoring · monitor.py"]
         LOG["predictions.db<br/>prediction log + feedback"]:::done
-        MET["/metrics + /dashboard<br/>1 h window, ≤1,000 rows"]:::done
-        ALR["Alerts in report:<br/>fallback, latency, drift, feedback accuracy"]:::partial
-        NOTIFY["Alert delivery<br/>page, email, chat"]:::skipped
+        MET["JSON + Prometheus metrics<br/>1 h window, ≤1,000 rows"]:::done
+        GR["Grafana service dashboard"]:::done
+        ALR["Prometheus rules + Alertmanager<br/>readiness and window alerts"]:::done
+        NOTIFY["Local webhook received<br/>firing and resolved notifications"]:::done
     end
 
     subgraph S7["7 · Release and operations"]
@@ -105,6 +106,7 @@ flowchart TB
     API --> FB
     API --> SH
     API --> LOG --> MET --> ALR
+    MET --> GR
     ALR -.-> NOTIFY
     LT -.-> API
     ALR -- runbook: rollback --> PTR
@@ -226,7 +228,7 @@ A file lock serializes every pointer change. `export` copies only the active bun
 | `input_drift` | Max channel RGB mean shift vs fit mean > 0.15 | 20 requests |
 | `feedback_accuracy_low` | Feedback accuracy < gate accuracy − 0.15 | 20 labeled |
 
-Alerts appear in the `/metrics` JSON and on `/dashboard`. Nothing pushes them anywhere. The response for each alert is in [runbook.md](runbook.md).
+Alert flags appear in the `/metrics` JSON, the built-in dashboard, and the Prometheus scrape. The local Compose stack evaluates those flags and readiness in Prometheus, plots the metrics in Grafana, and routes notifications through Alertmanager to a local webhook. [Monitoring runbook](runbook.md#local-monitoring-stack)
 
 ## Cloud deployment path
 
@@ -254,32 +256,53 @@ Local container verification used a synthetic release on `linux/arm64`. The `lin
 | 2 · Data pipeline | Done | Contract, quarantine, content-hashed Parquet. Full data prepared twice with byte-identical output. |
 | 3 · Training pipeline | Partial | Fixture and smoke runs registered. No full-profile model exists in `.state/full`. |
 | 4 · Evaluation gate | Done | A smoke candidate below baseline was rejected. Integration tests separately cover a baseline tie and a candidate that beats the baseline but regresses against the champion. |
-| 5 · Serving | Partial | Local HTTP inference, missing-weights fallback and shadow traffic were verified. The timeout is implemented. The timed HTTP check used the synthetic fixture. |
-| 6 · Monitoring | Partial | SQLite prediction logs, the built-in dashboard, and four alert rules exist. The local incident test exercised fallback and RGB drift alerts. Prometheus, Grafana, and alert delivery are planned. |
+| 5 · Serving | Partial | The fixture verified shadow traffic. The 200-class smoke model met the sequential latency target and recovered after a simulated missing-weights outage. The four-way load test measured 81% fallback with one inference slot. Full-model and cloud tests are pending. |
+| 6 · Monitoring | Partial | Prometheus scraped the smoke service and Grafana queried its provisioned data source. Alertmanager delivered firing and resolved notifications for a simulated missing-weights outage to the local webhook. A remote notification destination and cloud monitoring remain open. |
 | 7 · Release and operations | Partial | CI runs on GitHub for every pull request and every push to `main`. Dockerfile, Terraform config, shadow release and rollback exist. Cloud deploy has not run. |
-| 8 · Documentation | Partial | README framing, diagram, results and limitations. Explain and design checks are not written down. |
+| 8 · Documentation | Done for the local demo | README, runbook, acceptance evidence, and release-gate explanation are available. The from-memory explanation and reading comparison remain open. |
+
+## Acceptance evidence
+
+| Check | Evidence | Scope |
+| --- | --- | --- |
+| Fresh clone runs the pipeline | `make demo` on commit `80b4e31` installed, trained, registered, served, and monitored a synthetic fixture. | Local fixture |
+| Deterministic data and quarantine | Full data preparation produced byte-identical artifacts on repeat. A fixture test quarantined an injected malformed image. | Real-data preparation and fixture test |
+| Release gate blocks regressions | Integration tests reject a baseline tie and a candidate whose macro F1 regresses against the champion. The active release stays in place. | Local integration tests |
+| Latency and fallback | The 200-class smoke model served 50 sequential warmed requests at 4.8 ms p95 with zero fallbacks. Removing weights returned HTTP 503. At concurrency four, 81 of 100 requests fell back. | Local smoke release and simulated outage |
+| Monitoring and recovery | Prometheus scraped the smoke service, Grafana read its metrics, and Alertmanager sent firing and resolved notifications to the local webhook. Restoring the weights recovered active predictions. A separate integration test exercised shadow traffic, promotion, and rollback. | Local incident drill and integration test |
+| Model lineage | The fresh-clone fixture recorded its Git commit, data version, MLflow run and registry version. The older smoke release has a data version and MLflow record. Its Git commit field is empty. | Verified on the fresh-clone fixture |
+| Immutable cloud revision and teardown | Terraform initialized and validated locally. Cloud deployment, verification and teardown are deferred while cloud access is unavailable. | Local configuration verification |
+
+## Explain and design checks
+
+**Explain the release gate in five minutes.** Walk through the failure it prevents, what each partition is for, and how a candidate becomes active. Fit updates the weights. Tuning selects the checkpoint. The gate compares the frozen checkpoint against the majority baseline and, when present, the active champion. Accuracy and macro F1 must both beat the baseline. For example, a candidate with higher accuracy and lower macro F1 than the champion is rejected. The guard protects average per-class F1, and it can also block a candidate whose small apparent regression is sampling noise. A passing candidate can receive shadow traffic before promotion. Rollback restores the previous release pointer.
+
+**Design answer for holdout rotation.** Repeated release comparisons can turn a fixed holdout into a source of tuning feedback. Choosing which changes to keep based on observed gate scores favors changes that exploit chance patterns in that particular set. Merely reseeding the split also risks putting previously seen data into the new gate. In the project replay from seed 42 to 43, 3,599 of 4,000 new gate images had been in fit and 241 in tuning. The prepared seed-42 snapshot also has four tuning images and one gate image with byte-identical copies in fit.
+
+Reserve a labeled holdout that neither frozen model has seen during fit or tuning, or collect fresh labeled images for the project. Check IDs and image hashes against both models' data, and retain the holdout's version and fingerprint. Evaluate the frozen candidate, champion, and baseline on those same images. Use those scores for the decision and retain the reports with the release. The notebook's official evaluation split stays reserved for the notebook.
+
+**Remaining practice.** Give the explanation from memory and compare the written answer with the assigned chapter. Record a difference and how it changes the proposed design, or record that the two agree. [Design prompt](requirements.md)
 
 ## Delivery priorities
 
 1. **Register the first full-data model.** Train from scratch using the 75-epoch cap and tuning-based early stopping. Record both holdout metrics, the baseline, and the MLflow model version.
-2. **Verify serving and monitoring with that release.** Run the documented warmed latency check on the full model. Add a separate concurrent workload and report the concurrency, p95, and fallback rate. Expose Prometheus-compatible metrics, configure scraping and a Grafana dashboard, then inject a failure and confirm that the alert reaches its configured destination and clears after recovery.
-3. **Verify the cloud release.** Build and smoke-test the `linux/amd64` image, deploy by digest, verify authenticated predictions, and record teardown.
+2. **Verify serving and monitoring.** The registered smoke model covers the local workloads and alert drill while full training is deferred. Repeat the serial and concurrent tests with the first full release. Track active-response p95 and fallback rate under concurrent load.
+3. **Verify the cloud release when access is available.** Build and smoke-test the `linux/amd64` image, deploy by digest, verify authenticated predictions, and record teardown.
 
 ## Skipped and incomplete parts
 
 These items record open work and design choices.
 
-1. **Full-profile model.** `.state/full` holds only the prepared data version, with no `models/` or `releases.json`. Registered models are the synthetic fixture (75.00% gate accuracy) and the smoke candidate (2.50%). Close it with `python -m tiny_imagenet --state .state/full train --profile full` on a GPU or Apple Silicon, then record the gate scores.
-2. **Cloud deploy, verify and teardown.** `infra/terraform` has `.terraform/` and a lock file but no state file, so `init` ran and `apply` did not. No image was pushed. Close it by following [deployment.md](deployment.md) end to end and recording the URL check and the post-destroy check.
+1. **Full-profile model.** `.state/full` holds prepared data, with no saved full-model weights or `releases.json`. Registered models are the synthetic fixture (75.00% gate accuracy) and the smoke candidate (2.50%). Close it with `python -m tiny_imagenet --state .state/full train --profile full` on a GPU or Apple Silicon, then record the gate scores.
+2. **Cloud deploy, verify and teardown.** Deferred while cloud access is unavailable. Resume with the target-architecture image and record the authenticated endpoint and post-destroy checks. [Deployment runbook](deployment.md)
 3. **CI scope.** GitHub Actions runs Ruff, mypy and the test suite on every pull request and every push to `main`. It does not build the container image or run `terraform validate`.
-4. **Holdout rotation.** The current gate rejects a data-version mismatch. Rotating by changing the split seed exposes the comparison to leakage. When the full-data split seed changed from 42 to 43 in a read-only check, 3,599 of the 4,000 new gate images came from the original fit partition and 241 came from tuning. Reserve a separate labeled holdout before training any model that it may evaluate, or collect fresh labeled images for the project. Keep the official evaluation split reserved for the notebook's final evaluation. Record a separate holdout version and fingerprint its image IDs and content hashes. Before comparing, check that the new holdout is disjoint from the fit and tuning records of both models, including duplicate image bytes. Then score the frozen candidate and champion on that same holdout and retain both reports. A replacement holdout and its validation workflow remain future work.
-5. **Prometheus, Grafana, and alert delivery.** The current `/metrics` endpoint returns JSON and the built-in dashboard reads SQLite. Expose a Prometheus-compatible endpoint and use Grafana for time-series dashboards. Configure notification routing and verify an injected alert and recovery.
-6. **Load test scope.** 50 sequential requests on a local machine against the 4-class fixture. Concurrent load, the 200-class model and the cloud service are untested. Close it by rerunning against the full model and the Cloud Run URL.
+4. **Holdout rotation.** The current gate rejects a data-version mismatch. A replacement holdout and its validation workflow remain future work. [Rotation design](#explain-and-design-checks)
+5. **Alert delivery outside the local stack.** Firing and resolved notifications reached the local webhook. Routing to a hosted or team destination remains open.
+6. **Load test scope.** The 4-class fixture and 200-class smoke release were measured locally. Repeat the serial and concurrent workloads on the full-data release and on Cloud Run.
 7. **Canary release.** Only shadow is implemented. No traffic split sends a share of real responses to the candidate. The standard accepts shadow, so this is a design choice.
 8. **Persistent monitoring in the cloud.** SQLite lives in the container and disappears on scale-down. Close it with an external store such as Cloud SQL or BigQuery.
 9. **Drift coverage.** Drift checks only the per-channel RGB mean. Prediction-class distribution, image size mix and sharpness are not tracked.
 10. **Feedback endpoint access.** `/feedback` trusts any caller locally. In Cloud Run, IAM authentication covers the whole service, but there is no per-reviewer identity.
 11. **Gate statistics.** The gate compares point estimates on 4,000 images with no confidence interval. Small gains can be noise.
 12. **Shared Terraform module.** The standard asks for the shared module. This project uses a standalone `main.tf`, and the Artifact Registry repository and service account are created outside Terraform.
-13. **Explain and design checks.** The holdout-rotation design question in [requirements.md](requirements.md) has no written answer or comparison with the reading.
-14. **Notebook 75-epoch run.** The research notebook's saved log comes from an 80-epoch run. A run configured for 75 epochs has not been executed, so its result is unverified.
+13. **Notebook 75-epoch run.** The research notebook's saved log comes from an 80-epoch run. A run configured for 75 epochs has not been executed, so its result is unverified.
