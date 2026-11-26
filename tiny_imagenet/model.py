@@ -1,4 +1,4 @@
-"""Residual CNN from the homework notebook."""
+"""Residual CNN from the research notebook."""
 
 import torch
 from torch import nn
