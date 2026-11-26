@@ -7,7 +7,70 @@ from contextlib import contextmanager
 from pathlib import Path
 from time import time
 
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
 from sklearn.metrics import f1_score
+
+ALERT_NAMES = (
+    "fallback_rate_high",
+    "latency_high",
+    "input_drift",
+    "feedback_accuracy_low",
+)
+
+
+def prometheus_metrics(report: dict, ready: bool) -> bytes:
+    registry = CollectorRegistry()
+    p95_ms = report["p95_ms"]
+    gauges = (
+        ("ready", "Whether active model weights are available.", int(ready)),
+        (
+            "window_requests",
+            "Prediction attempts in the active release window.",
+            report["requests"],
+        ),
+        (
+            "window_request_duration_p95_seconds",
+            "Window p95 prediction processing time in seconds.",
+            p95_ms / 1000 if p95_ms is not None else None,
+        ),
+        (
+            "window_fallback_ratio",
+            "Fraction of window attempts that abstained.",
+            report["fallback_rate"],
+        ),
+        (
+            "window_rgb_mean_shift",
+            "Largest window RGB channel mean shift.",
+            report["rgb_mean_shift"],
+        ),
+        (
+            "window_labeled",
+            "Labeled active predictions in the window.",
+            report["labeled"],
+        ),
+        (
+            "window_feedback_accuracy",
+            "Accuracy on labeled window predictions.",
+            report["feedback_accuracy"],
+        ),
+        (
+            "window_feedback_macro_f1",
+            "Macro F1 on labeled window predictions.",
+            report["feedback_macro_f1"],
+        ),
+    )
+    for name, help_text, value in gauges:
+        if value is not None:
+            Gauge(f"tiny_imagenet_{name}", help_text, registry=registry).set(value)
+    alert = Gauge(
+        "tiny_imagenet_alert",
+        "Whether the service alert is active.",
+        ["kind"],
+        registry=registry,
+    )
+    for name in ALERT_NAMES:
+        alert.labels(kind=name).set(int(name in report["alerts"]))
+    return generate_latest(registry)
 
 
 class Monitor:
