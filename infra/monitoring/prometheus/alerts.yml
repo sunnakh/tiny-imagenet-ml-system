@@ -1,0 +1,18 @@
+groups:
+  - name: tiny-imagenet
+    rules:
+      - alert: TinyImageNetScrapeDown
+        expr: up{job="tiny-imagenet"} == 0
+        for: 15s
+        annotations:
+          summary: Prometheus cannot scrape the classifier.
+      - alert: TinyImageNetModelUnavailable
+        expr: tiny_imagenet_ready == 0
+        for: 10s
+        annotations:
+          summary: The classifier has no available active weights.
+      - alert: TinyImageNetServiceWindowAlert
+        expr: tiny_imagenet_alert == 1
+        for: 10s
+        annotations:
+          summary: 'Classifier alert {{ $labels.kind }} is active.'
