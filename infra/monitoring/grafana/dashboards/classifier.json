@@ -1,0 +1,195 @@
+{
+  "uid": "tiny-imagenet-service",
+  "title": "Tiny ImageNet Service",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Health",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tiny-imagenet-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=\"tiny-imagenet\"}",
+          "legendFormat": "Scrape up"
+        },
+        {
+          "refId": "B",
+          "expr": "tiny_imagenet_ready{job=\"tiny-imagenet\"}",
+          "legendFormat": "Model ready"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Prediction window",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tiny-imagenet-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tiny_imagenet_window_requests{job=\"tiny-imagenet\"}",
+          "legendFormat": "Attempts"
+        },
+        {
+          "refId": "B",
+          "expr": "tiny_imagenet_window_labeled{job=\"tiny-imagenet\"}",
+          "legendFormat": "Labeled"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Processing p95",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tiny-imagenet-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tiny_imagenet_window_request_duration_p95_seconds{job=\"tiny-imagenet\"}",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Fallback ratio",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tiny-imagenet-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tiny_imagenet_window_fallback_ratio{job=\"tiny-imagenet\"}",
+          "legendFormat": "Fallback"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Input RGB mean shift",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tiny-imagenet-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tiny_imagenet_window_rgb_mean_shift{job=\"tiny-imagenet\"}",
+          "legendFormat": "Largest channel shift"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Feedback quality",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tiny-imagenet-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "tiny_imagenet_window_feedback_accuracy{job=\"tiny-imagenet\"}",
+          "legendFormat": "Accuracy"
+        },
+        {
+          "refId": "B",
+          "expr": "tiny_imagenet_window_feedback_macro_f1{job=\"tiny-imagenet\"}",
+          "legendFormat": "Macro F1"
+        }
+      ]
+    }
+  ]
+}
