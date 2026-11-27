@@ -19,17 +19,19 @@ flowchart LR
     O --> P
 ```
 
-The local demo is verified with the registered smoke model and synthetic fixture. Full-data training and the Cloud Run deployment are deferred. [Acceptance evidence](docs/design.md#acceptance-evidence)
+The first full-data model is registered in MLflow and verified locally. It scored **51.10% accuracy and 50.93% macro F1** on the 4,000-image release holdout. Cloud Run verification and teardown are pending. [Acceptance evidence](docs/design.md#acceptance-evidence)
 
 ## Run locally
 
 ### Serve an existing model
 
-If `.state/smoke` already contains the registered smoke release, start the API directly:
+If `.state/full` contains the active full release, start the API without retraining.
 
 ```bash
-.venv/bin/python -m tiny_imagenet --state .state/smoke serve
+.venv/bin/python -m tiny_imagenet --state .state/full serve
 ```
+
+Use `.state/smoke` instead if that is where you registered a smoke model.
 
 For Prometheus, Grafana, and an alert drill on a disposable copy, follow the [monitoring runbook](docs/runbook.md#local-monitoring-stack).
 
@@ -45,6 +47,18 @@ This command installs the project, trains a small synthetic fixture on-device, a
 
 ```bash
 .venv/bin/python -m tiny_imagenet.load_test
+```
+
+If the default fixture directory contains a model from an older data contract, use a fresh state directory. Use an available port if another service is listening on port 8080. This example uses `.state/fixture-v2` and port 18081.
+
+```bash
+make demo STATE=.state/fixture-v2 ARGS='--port 18081'
+```
+
+After the fixture has registered, serve it directly for later sessions. This skips the training pipeline.
+
+```bash
+.venv/bin/python -m tiny_imagenet --state .state/fixture-v2 serve --port 18081
 ```
 
 ### Train on real images
@@ -75,7 +89,9 @@ curl -fsS -H 'Content-Type: application/octet-stream' \
 
 | Check | Observed result |
 | --- | --- |
-| Full data preparation | 90,000 fit, 6,000 tuning, 4,000 gate images, zero quarantined. Two independent runs produced byte-identical artifacts. |
+| Full data preparation | 89,960 fit, 6,000 tuning, and 4,000 gate images. Quarantined 40 rows in 20 groups of identical images with conflicting labels. Two builds produced byte-identical artifacts with unique image hashes across all partitions. |
+| Full model | Early stopping ended training at epoch 33 and selected epoch 23. MLflow version 1 passed the gate at 51.10% accuracy and 50.93% macro F1. [Training and gate evidence](docs/design.md#full-model-training-and-lineage) |
+| Full-model HTTP load | 4.1 ms p95 over 50 sequential warmed requests and 8.9 ms p95 over 100 warmed requests at concurrency four. Zero fallbacks in both runs. [Serving and recovery evidence](docs/design.md#full-model-serving-and-recovery) |
 | Real-data smoke candidate | Six epochs on 1,600 fit images. Holdout accuracy 2.50% and macro F1 1.42%. The candidate passed the 0.50% accuracy majority baseline and was registered. |
 | Synthetic fixture | 75.00% gate accuracy and 66.67% macro F1 on 16 synthetic gate images |
 | Local HTTP latency | 9.3 ms p95 over 50 sequential warmed requests against the synthetic fixture, with a 250 ms target |
@@ -85,6 +101,6 @@ curl -fsS -H 'Content-Type: application/octet-stream' \
 | Fresh clone, one command | `make demo` on a clean clone of commit `80b4e31` installed, trained, registered and served the synthetic fixture in about 155 s. 50 warmed requests ran at 4.0 ms p95. Removing the weights returned HTTP 503 fallback and raised `fallback_rate_high`. The served model recorded its Git commit, data version, MLflow run and registry version. |
 | Continuous integration | GitHub Actions runs Ruff, mypy and the test suite on every pull request and every push to `main`. |
 
-The saved notebook log shows **51.11% internal tuning accuracy at epoch 75** of a run configured for 80 epochs. The project uses a different holdout and release gate. The smoke and fixture results above verify the pipeline at reduced scale. A full-data project model requires a fresh training and evaluation run. [Notebook training log](notebooks/tiny-imagenet-classifier.ipynb)
+The saved notebook log shows **51.11% internal tuning accuracy at epoch 75** of a run configured for 80 epochs. The project results use the separate release holdout drawn from the official training split. [Notebook training log](notebooks/tiny-imagenet-classifier.ipynb)
 
 The release gate compares point estimates on a fixed holdout. Repeated tuning against that holdout reduces its independence. The active worker allows up to three waiting requests. Saturation and deadline expiry still return HTTP 503. Feedback metrics cover the labeled subset and may be biased. The monitoring stack and notification receiver were verified locally. [Design and limitations](docs/design.md#skipped-and-incomplete-parts)

@@ -81,7 +81,7 @@ def source(
 def prepare(root: Path, profile: str, seed: int, arrow: Path | None = None) -> Path:
     names, raw_rows = source(profile, arrow)
     targets = PROFILES.get(profile, (16, 4, 4))
-    grouped: dict[int, list[tuple[int, int, bytes]]] = defaultdict(list)
+    by_image: dict[str, list[tuple[int, int, bytes]]] = defaultdict(list)
     rejects = []
     seen = set()
     for row_id, label, raw in raw_rows:
@@ -105,7 +105,22 @@ def prepare(root: Path, profile: str, seed: int, arrow: Path | None = None) -> P
                 }
             )
             continue
-        grouped[label].append((row_id, label, raw))
+        by_image[hashlib.sha256(raw).hexdigest()].append((row_id, label, raw))
+
+    grouped: dict[int, list[tuple[int, int, bytes]]] = defaultdict(list)
+    for image_sha256, rows in by_image.items():
+        first, *copies = rows
+        if any(row[1] != first[1] for row in copies):
+            rejected = rows
+            reason = "conflicting labels for identical image"
+        else:
+            grouped[first[1]].append(first)
+            rejected = copies
+            reason = "duplicate image with same label"
+        rejects.extend(
+            {"id": row[0], "reason": reason, "image_sha256": image_sha256}
+            for row in rejected
+        )
 
     subsets: dict[str, list[tuple[int, int, bytes]]] = {
         key: [] for key in ("fit", "tune", "gate")
@@ -128,7 +143,7 @@ def prepare(root: Path, profile: str, seed: int, arrow: Path | None = None) -> P
             start += count
 
     manifest = {
-        "contract": 1,
+        "contract": 2,
         "source": "synthetic" if profile == "fixture" else DATASET,
         "revision": None if profile == "fixture" or arrow is not None else REVISION,
         "profile": profile,

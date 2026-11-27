@@ -4,14 +4,14 @@
 
 **ML task and baseline.** Supervised 200-class classification from scratch. The non-ML baseline always predicts the most frequent class in the fit partition, breaking ties by class index. The model must beat that baseline in accuracy and macro F1. On the same version of the release holdout, it must match or beat the champion in both metrics and improve at least one.
 
-**Data contract.** Pin the Tiny ImageNet source revision. Verify class balance and IDs, decode images and convert to RGB, quarantine invalid records, then write deterministic fit, tuning, and gate Parquet partitions. Compute normalization exclusively on fit images. Use tuning accuracy for checkpoint selection and the gate holdout for release decisions. The original Tiny ImageNet validation split is reserved for the research notebook's final evaluation.
+**Data contract.** Pin the Tiny ImageNet source revision. Verify class balance and IDs, decode images and convert to RGB, and quarantine invalid records. Group valid rows by the SHA-256 of their original image bytes before partitioning. Keep the first valid copy in source order when labels agree and quarantine all copies when labels conflict. Write deterministic fit, tuning, and gate Parquet partitions with unique image hashes. Compute normalization exclusively on fit images. Use tuning accuracy for checkpoint selection and the gate holdout for release decisions. The original Tiny ImageNet validation split is reserved for the research notebook's final evaluation.
 
 **Serving and operation.** Target HTTP p95 at or below 250 ms for 50 sequential warmed requests on the local machine. Return a structured fallback with HTTP 503 if the model is missing, busy, or exceeds the inference timeout. Track response latency, fallback rate, RGB mean shift, and accuracy and macro F1 on supplied feedback. Trace predictions through the release ID, MLflow run and registry version, code fingerprint, and data version. Record the Git commit when the source tree has one.
 
 **Acceptance checks.**
 
 - Run the fixture end to end from data preparation to an HTTP response and monitoring.
-- Produce byte-identical data artifacts given the same input, seed, and environment. Quarantine an injected malformed record.
+- Produce byte-identical data artifacts given the same input, seed, and environment. Quarantine an injected malformed record and conflicting image copies. Retain one same-label copy before splitting.
 - Reject a deliberately worse candidate and retain the active release.
 - Meet the warmed HTTP p95 target and reproduce the service fallback by removing the active weights from a disposable release.
 - Trigger an alert with shifted inputs and demonstrate shadow traffic, promotion, and rollback.

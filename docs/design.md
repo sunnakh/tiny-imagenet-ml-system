@@ -40,6 +40,7 @@ flowchart TB
     subgraph S2["2 · Data pipeline · data.py"]
         SRC["HF zh-plus/tiny-imagenet<br/>pinned revision, train split<br/>or synthetic fixture"]:::done
         VAL["Validate contract<br/>200 classes × 500 rows<br/>label range, unique ID, 64×64 decode"]:::done
+        DUP["Resolve identical image bytes"]:::done
         QUA["quarantine.json"]:::done
         SPLIT["Seeded per-class split"]:::done
         PART["data/{version}/<br/>fit · tune · gate .parquet<br/>manifest.json"]:::done
@@ -49,7 +50,7 @@ flowchart TB
         NORM["Normalization from fit only"]:::done
         FIT["TinyCNN, AdamW, cosine LR<br/>augment: pad-crop + flip"]:::done
         CKPT["Best epoch by tuning accuracy<br/>early stop with patience"]:::done
-        FULL["Full-profile model<br/>90k fit images, cap 75 epochs"]:::skipped
+        FULL["Full-profile model<br/>89,960 fit images, stopped at epoch 33"]:::done
     end
 
     subgraph S4["4 · Evaluation gate · release.py"]
@@ -69,7 +70,7 @@ flowchart TB
         API["HTTP API<br/>/predict /feedback /health"]:::done
         FB["Fallback: HTTP 503 abstain<br/>missing, queue full, timeout, error"]:::done
         SH["Shadow inference, async"]:::done
-        LT["Smoke HTTP: serial and concurrent<br/>full-model load pending"]:::partial
+        LT["Smoke and full-model HTTP<br/>serial and concurrent load verified locally"]:::done
     end
 
     subgraph S6["6 · Monitoring · monitor.py"]
@@ -90,7 +91,9 @@ flowchart TB
     REQ --> SRC
     SRC --> VAL
     VAL -- bad rows --> QUA
-    VAL -- valid rows --> SPLIT --> PART
+    VAL -- valid rows --> DUP
+    DUP -- excluded copies --> QUA
+    DUP -- retained rows --> SPLIT --> PART
     PART -- fit --> NORM --> FIT
     PART -- tune --> CKPT
     FIT --> CKPT
@@ -126,16 +129,20 @@ flowchart TB
 flowchart LR
     A["Source rows<br/>(id, label, image bytes)"] --> B{"Contract check"}
     B -- "bad label, missing bytes,<br/>duplicate ID, decode error,<br/>not 64×64" --> Q["quarantine.json<br/>id, reason, image sha256"]
-    B -- valid --> C["Group by class"]
+    B -- valid --> X["Resolve copies by image SHA-256"]
+    X -- excluded copies --> Q
+    X -- retained --> C["Group by class"]
     C --> D["Permute each class<br/>with seed"]
-    D --> E["fit: 450/class<br/>tune: 30/class<br/>gate: 20/class"]
-    E --> H["sha256 over manifest,<br/>rejects and partition bytes"]
+    D --> E["fit: remaining/class<br/>tune: 30/class<br/>gate: 20/class"]
+    E --> H["SHA-256 over manifest,<br/>rejects and partition rows"]
     H --> V{"data/{version}/<br/>exists?"}
     V -- yes --> R["Reuse existing version"]
     V -- no --> W["Write to temp dir,<br/>then atomic rename"]
 ```
 
-The version is a content hash, so the same input, seed and profile produce the same directory. A rerun returns the existing version. The full run prepared 90,000 fit, 6,000 tuning and 4,000 gate images with zero quarantined. The official `valid` split never enters this pipeline because the research notebook reserves it for the final evaluation.
+The version hashes the manifest, quarantine records, and ordered partition rows before Parquet serialization. The same input, contract, seed, and profile produce the same version in the same environment. The current contract groups valid rows by exact image bytes before splitting. For consistent labels it keeps the first valid row in source order and quarantines later copies. For conflicting labels it quarantines every copy. The full run quarantined 40 rows from 20 conflicting groups and produced 89,960 fit, 6,000 tuning and 4,000 gate images. All retained hashes were unique across the three partitions. The official `valid` split never enters this pipeline because the research notebook reserves it for the final evaluation.
+
+The duplicate-handling contract creates a new data version. Existing releases keep their original data lineage. Use a fresh state directory for a run under the new contract if the current state already has an active model from the older version. A future cross-version comparison would require scoring both models on the same eligible holdout.
 
 ## Training and evaluation gate
 
@@ -164,6 +171,25 @@ flowchart TB
 ```
 
 Rejected candidates are logged in MLflow with `gate=rejected` and `gate_reason`. The current gate rejects a candidate evaluated on a different data version from the champion. That guard stays in place until the holdout rotation plan below is implemented.
+
+### Full-model training and lineage
+
+The first full run used seed 42 and a 75-epoch cap. Tuning accuracy peaked at 51.00% at epoch 23, and training stopped at epoch 33 after ten epochs without improvement. Re-evaluation of the saved checkpoint reproduced the recorded scores on the 4,000-image gate partition.
+
+| Gate result | Accuracy | Macro F1 |
+| --- | ---: | ---: |
+| Full model | 51.10% | 50.93% |
+| Majority-class baseline | 0.50% | 0.00498% |
+
+The run passed the baseline gate and became the first active release in `.state/full`.
+
+| Lineage | Value |
+| --- | --- |
+| Git commit | `3510a39cd025f57362c840fbe027321cd476fe62` |
+| Data version | `c6ec44ba573a7381ac6f1507a707db7931d8755447228148cdbacefd6bd654b5` |
+| MLflow run | `271c3269b81f41ea872051bbb1d861b2` |
+| Local registry | `tiny-imagenet-cnn`, version 1 |
+| Active release | `e2354170-3390-420b-b8af-8bd5eaaf963e` |
 
 ## Serving request path
 
@@ -213,6 +239,17 @@ Four alternating trials used the same local 200-class smoke model and image. Eac
 | Concurrency 4 | 8.6 ms | 12.5 ms | 327 / 400 | 0 / 400 |
 
 At concurrency four, p95 for successful predictions was 8.9 ms before the change and 12.5 ms with the queue. The queue traded additional waiting latency for fewer fallbacks under this workload. The 250 ms target applies to the sequential workload.
+
+### Full-model serving and recovery
+
+A disposable export of the full release served the same Tiny ImageNet image over local HTTP for both warmed workloads.
+
+| Workload | Requests | Client p95 | Fallbacks |
+| --- | ---: | ---: | ---: |
+| Sequential | 50 | 4.1 ms | 0 |
+| Concurrency 4 | 100 | 8.9 ms | 0 |
+
+With the weights temporarily removed from the export, `/predict` returned the HTTP 503 fallback and `/metrics` reported `fallback_rate_high`. Restoring the weights recovered HTTP 200 predictions. The alert cleared after successful requests brought the fallback share below its threshold. The built-in dashboard and Prometheus metrics endpoint responded. Grafana and Alertmanager webhook delivery were verified in the earlier smoke-model drill.
 
 ## Release states
 
@@ -265,10 +302,10 @@ Local container verification used a synthetic release on `linux/arm64`. The `lin
 | --- | --- | --- |
 | 1 · Requirements | Done | [requirements.md](requirements.md) |
 | 2 · Data pipeline | Done | Contract, quarantine, content-hashed Parquet. Full data prepared twice with byte-identical output. |
-| 3 · Training pipeline | Partial | Fixture and smoke runs registered. No full-profile model exists in `.state/full`. |
+| 3 · Training pipeline | Done locally | Fixture, smoke, and full models registered. The full release is active in `.state/full`. [Scores and lineage](#full-model-training-and-lineage) |
 | 4 · Evaluation gate | Done | A smoke candidate below baseline was rejected. Integration tests separately cover a baseline tie and a candidate that beats the baseline but regresses against the champion. |
-| 5 · Serving | Partial | The fixture verified shadow traffic. The 200-class smoke model met the sequential latency target and recovered after a simulated missing-weights outage. The bounded queue reduced fallbacks at concurrency four from 327 of 400 requests to zero in the local comparison. Full-model and cloud tests are pending. |
-| 6 · Monitoring | Partial | Prometheus scraped the smoke service and Grafana queried its provisioned data source. Alertmanager delivered firing and resolved notifications for a simulated missing-weights outage to the local webhook. A remote notification destination and cloud monitoring remain open. |
+| 5 · Serving | Done locally | The fixture verified shadow traffic. The full release met the warmed sequential latency target and recovered after a simulated missing-weights outage. Cloud verification remains open. [Full-model results](#full-model-serving-and-recovery) |
+| 6 · Monitoring | Partial | The full release exposed dashboard and Prometheus metrics and fired and cleared an application alert. The smoke drill verified the local Grafana and Alertmanager stack. A remote notification destination and cloud monitoring remain open. |
 | 7 · Release and operations | Partial | CI runs on GitHub for every pull request and every push to `main`. Dockerfile, Terraform config, shadow release and rollback exist. Cloud deploy has not run. |
 | 8 · Documentation | Done for the local demo | README, runbook, acceptance evidence, and release-gate explanation are available. The from-memory explanation and reading comparison remain open. |
 
@@ -277,18 +314,18 @@ Local container verification used a synthetic release on `linux/arm64`. The `lin
 | Check | Evidence | Scope |
 | --- | --- | --- |
 | Fresh clone runs the pipeline | `make demo` on commit `80b4e31` installed, trained, registered, served, and monitored a synthetic fixture. | Local fixture |
-| Deterministic data and quarantine | Full data preparation produced byte-identical artifacts on repeat. A fixture test quarantined an injected malformed image. | Real-data preparation and fixture test |
+| Deterministic data and quarantine | Full data preparation produced byte-identical artifacts on repeat. Fixture tests cover malformed images, conflicting labels, same-label copies, and minimum class size after quarantine. | Real-data preparation and fixture test |
 | Release gate blocks regressions | Integration tests reject a baseline tie and a candidate whose macro F1 regresses against the champion. The active release stays in place. | Local integration tests |
-| Latency and fallback | The smoke model met the sequential p95 target in all four trials with the queue. At concurrency four, all 400 requests completed. Removing weights still returned HTTP 503. | Local smoke release and simulated outage |
-| Monitoring and recovery | Prometheus scraped the smoke service, Grafana read its metrics, and Alertmanager sent firing and resolved notifications to the local webhook. Restoring the weights recovered active predictions. A separate integration test exercised shadow traffic, promotion, and rollback. | Local incident drill and integration test |
-| Model lineage | The fresh-clone fixture recorded its Git commit, data version, MLflow run and registry version. The older smoke release has a data version and MLflow record. Its Git commit field is empty. | Verified on the fresh-clone fixture |
-| Immutable cloud revision and teardown | Terraform initialized and validated locally. Cloud deployment, verification and teardown are deferred while cloud access is unavailable. | Local configuration verification |
+| Latency and fallback | The full model met the 250 ms sequential p95 target. Both warmed workloads had zero fallbacks. Removing weights returned HTTP 503. | Local full release and simulated outage |
+| Monitoring and recovery | The full model's fallback alert fired and cleared after restoring weights and sending successful predictions. The smoke drill verified firing and resolved webhook notifications. An integration test exercised shadow traffic, promotion, and rollback. | Local incident drills and integration test |
+| Model lineage | The full release and fresh-clone fixture recorded their Git commit, data version, MLflow run, and registry version. The older smoke release has a data version and MLflow record. Its Git commit field is empty. | Full release and fresh-clone fixture |
+| Immutable cloud revision and teardown | Terraform initialized and validated locally. Deployment, authenticated verification, and teardown remain open. | Local configuration verification |
 
 ## Explain and design checks
 
 **Explain the release gate in five minutes.** Walk through the failure it prevents, what each partition is for, and how a candidate becomes active. Fit updates the weights. Tuning selects the checkpoint. The gate compares the frozen checkpoint against the majority baseline and, when present, the active champion. Accuracy and macro F1 must both beat the baseline. For example, a candidate with higher accuracy and lower macro F1 than the champion is rejected. The guard protects average per-class F1, and it can also block a candidate whose small apparent regression is sampling noise. A passing candidate can receive shadow traffic before promotion. Rollback restores the previous release pointer.
 
-**Design answer for holdout rotation.** Repeated release comparisons can turn a fixed holdout into a source of tuning feedback. Choosing which changes to keep based on observed gate scores favors changes that exploit chance patterns in that particular set. Merely reseeding the split also risks putting previously seen data into the new gate. In the project replay from seed 42 to 43, 3,599 of 4,000 new gate images had been in fit and 241 in tuning. The prepared seed-42 snapshot also has four tuning images and one gate image with byte-identical copies in fit.
+**Design answer for holdout rotation.** Repeated release comparisons can turn a fixed holdout into a source of tuning feedback. Choosing which changes to keep based on observed gate scores favors changes that exploit chance patterns in that particular set. Merely reseeding the split also risks putting previously seen data into the new gate. In the project replay from seed 42 to 43, 3,599 of 4,000 new gate images had been in fit and 241 in tuning. The original seed-42 snapshot had four tuning images and one gate image with byte-identical copies in fit. The current snapshot resolves exact duplicates before splitting.
 
 Reserve a labeled holdout that neither frozen model has seen during fit or tuning, or collect fresh labeled images for the project. Check IDs and image hashes against both models' data, and retain the holdout's version and fingerprint. Evaluate the frozen candidate, champion, and baseline on those same images. Use those scores for the decision and retain the reports with the release. The notebook's official evaluation split stays reserved for the notebook.
 
@@ -296,24 +333,21 @@ Reserve a labeled holdout that neither frozen model has seen during fit or tunin
 
 ## Delivery priorities
 
-1. **Register the first full-data model.** Train from scratch using the 75-epoch cap and tuning-based early stopping. Record both holdout metrics, the baseline, and the MLflow model version.
-2. **Verify serving and monitoring.** The registered smoke model covers the local workloads and alert drill while full training is deferred. Repeat the serial and concurrent tests with the first full release. Track active-response p95 and fallback rate under concurrent load.
-3. **Verify the cloud release when access is available.** Build and smoke-test the `linux/amd64` image, deploy by digest, verify authenticated predictions, and record teardown.
+1. **Review the duplicate-image fix.** Land the updated data contract, regression tests, and full-model evidence together through the existing branch.
+2. **Verify the cloud release.** Build and smoke-test the `linux/amd64` image and deploy by digest to an authorized Cloud Run target. Verify authenticated predictions, run the serving workloads, and record teardown. [Deployment runbook](deployment.md)
 
 ## Skipped and incomplete parts
 
 These items record open work and design choices.
 
-1. **Full-profile model.** `.state/full` holds prepared data, with no saved full-model weights or `releases.json`. Registered models are the synthetic fixture (75.00% gate accuracy) and the smoke candidate (2.50%). Close it with `python -m tiny_imagenet --state .state/full train --profile full` on a GPU or Apple Silicon, then record the gate scores.
-2. **Cloud deploy, verify and teardown.** Deferred while cloud access is unavailable. Resume with the target-architecture image and record the authenticated endpoint and post-destroy checks. [Deployment runbook](deployment.md)
-3. **CI scope.** GitHub Actions runs Ruff, mypy and the test suite on every pull request and every push to `main`. It does not build the container image or run `terraform validate`.
-4. **Holdout rotation.** The current gate rejects a data-version mismatch. A replacement holdout and its validation workflow remain future work. [Rotation design](#explain-and-design-checks)
-5. **Alert delivery outside the local stack.** Firing and resolved notifications reached the local webhook. Routing to a hosted or team destination remains open.
-6. **Load test scope.** The 4-class fixture and 200-class smoke release were measured locally. Repeat the serial and concurrent workloads on the full-data release and on Cloud Run.
-7. **Canary release.** Only shadow is implemented. No traffic split sends a share of real responses to the candidate. The standard accepts shadow, so this is a design choice.
-8. **Persistent monitoring in the cloud.** SQLite lives in the container and disappears on scale-down. Close it with an external store such as Cloud SQL or BigQuery.
-9. **Drift coverage.** Drift checks only the per-channel RGB mean. Prediction-class distribution, image size mix and sharpness are not tracked.
-10. **Feedback endpoint access.** `/feedback` trusts any caller locally. In Cloud Run, IAM authentication covers the whole service, but there is no per-reviewer identity.
-11. **Gate statistics.** The gate compares point estimates on 4,000 images with no confidence interval. Small gains can be noise.
-12. **Shared Terraform module.** The standard asks for the shared module. This project uses a standalone `main.tf`, and the Artifact Registry repository and service account are created outside Terraform.
-13. **Notebook 75-epoch run.** The research notebook's saved log comes from an 80-epoch run. A run configured for 75 epochs has not been executed, so its result is unverified.
+1. **Cloud deploy, verify and teardown.** Verify the target-architecture image, authenticated endpoint, serving workloads, and post-destroy state. [Deployment runbook](deployment.md)
+2. **CI scope.** GitHub Actions runs Ruff, mypy and the test suite on every pull request and every push to `main`. It does not build the container image or run `terraform validate`.
+3. **Holdout rotation.** The current gate rejects a data-version mismatch. A replacement holdout and its validation workflow remain future work. [Rotation design](#explain-and-design-checks)
+4. **Alert delivery outside the local stack.** Firing and resolved notifications reached the local webhook. Routing to a hosted or team destination remains open.
+5. **Canary release.** Only shadow is implemented. No traffic split sends a share of real responses to the candidate. The standard accepts shadow, so this is a design choice.
+6. **Persistent monitoring in the cloud.** SQLite lives in the container and disappears on scale-down. Close it with an external store such as Cloud SQL or BigQuery.
+7. **Drift coverage.** Drift checks only the per-channel RGB mean. Prediction-class distribution, image size mix and sharpness are not tracked.
+8. **Feedback endpoint access.** `/feedback` trusts any caller locally. In Cloud Run, IAM authentication covers the whole service, but there is no per-reviewer identity.
+9. **Gate statistics.** The gate compares point estimates on 4,000 images with no confidence interval. Small gains can be noise.
+10. **Shared Terraform module.** The standard asks for the shared module. This project uses a standalone `main.tf`, and the Artifact Registry repository and service account are created outside Terraform.
+11. **Notebook 75-epoch run.** The research notebook's saved log comes from an 80-epoch run. Its 75-epoch configuration remains unverified.
