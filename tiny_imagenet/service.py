@@ -4,7 +4,7 @@ import html
 import json
 import logging
 import uuid
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import BoundedSemaphore
@@ -22,14 +22,15 @@ from .release import bundle_path, metadata_for, releases, validate_weights
 from .training import load_model
 
 MAX_BYTES = 64 * 1024
+ACTIVE_QUEUE_SIZE = 3
 LOG = logging.getLogger(__name__)
 
 
 class Inference:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, queue_size: int = 0) -> None:
         self.root = root
         self.pool = ThreadPoolExecutor(max_workers=1)
-        self.slot = BoundedSemaphore()
+        self.slots = BoundedSemaphore(1 + queue_size)
         self.cached: tuple[str, TinyCNN, dict] | None = None
 
     def predict(self, release_id: str, raw: torch.Tensor) -> tuple[int, str]:
@@ -49,15 +50,27 @@ class Inference:
             prediction = int(model(((raw - mean) / std)[None]).argmax(1).item())
         return prediction, metadata["classes"][prediction]
 
-    def submit(self, release_id: str, raw: torch.Tensor):
-        if not self.slot.acquire(blocking=False):
+    def submit(
+        self, release_id: str, raw: torch.Tensor, *, deadline: float | None = None
+    ) -> Future[tuple[int, str]] | None:
+        if not self.slots.acquire(blocking=False):
             return None
+
+        def run() -> tuple[int, str]:
+            if deadline is not None and perf_counter() >= deadline:
+                raise TimeoutError("inference expired in the queue")
+            result = self.predict(release_id, raw)
+            if deadline is not None and perf_counter() >= deadline:
+                raise TimeoutError("inference completed after the deadline")
+            return result
+
         try:
-            future = self.pool.submit(self.predict, release_id, raw)
+            future = self.pool.submit(run)
         except RuntimeError:
-            self.slot.release()
+            self.slots.release()
             raise
-        future.add_done_callback(lambda _: self.slot.release())
+        # A timed-out request keeps its slot until the executor removes the work.
+        future.add_done_callback(lambda _: self.slots.release())
         return future
 
 
@@ -66,7 +79,7 @@ class App:
         self.root = root
         self.timeout_ms = timeout_ms
         self.monitor = Monitor(root)
-        self.active = Inference(root)
+        self.active = Inference(root, queue_size=ACTIVE_QUEUE_SIZE)
         self.shadow = Inference(root)
 
     def predict(self, image: bytes) -> dict[str, Any]:
@@ -78,10 +91,11 @@ class App:
         request_id = str(uuid.uuid4())
         mode, class_id, label = "fallback", None, None
         if active:
-            future = self.active.submit(active, pixels)
+            deadline = perf_counter() + self.timeout_ms / 1000
+            future = self.active.submit(active, pixels, deadline=deadline)
             if future is not None:
                 try:
-                    class_id, label = future.result(self.timeout_ms / 1000)
+                    class_id, label = future.result(max(0, deadline - perf_counter()))
                     mode = "active"
                 except TimeoutError:
                     LOG.warning("inference timeout for %s", active)

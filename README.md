@@ -79,7 +79,7 @@ curl -fsS -H 'Content-Type: application/octet-stream' \
 | Real-data smoke candidate | Six epochs on 1,600 fit images. Holdout accuracy 2.50% and macro F1 1.42%. The candidate passed the 0.50% accuracy majority baseline and was registered. |
 | Synthetic fixture | 75.00% gate accuracy and 66.67% macro F1 on 16 synthetic gate images |
 | Local HTTP latency | 9.3 ms p95 over 50 sequential warmed requests against the synthetic fixture, with a 250 ms target |
-| Smoke HTTP load | 50 sequential warmed requests at 4.8 ms p95 with zero fallbacks. At concurrency 4, 100 requests yielded 6.2 ms overall p95, 6.6 ms active p95, and 81% fallback. |
+| Smoke HTTP load | With the bounded queue, median p95 was 4.5 ms at concurrency 1 and 12.5 ms at concurrency 4. At concurrency 4, fallbacks dropped from 327 of 400 requests to zero. [Benchmark details](docs/design.md#bounded-queue-benchmark) |
 | Local monitoring | Prometheus scraped the smoke service and Grafana displayed its metrics. A simulated missing-weights outage returned HTTP 503. Alertmanager delivered firing and resolved notifications to the local webhook. |
 | Local Docker image | Health, prediction, and metrics endpoints passed. The synthetic fixture served 10 warmed requests at 24.8 ms p95. |
 | Fresh clone, one command | `make demo` on a clean clone of commit `80b4e31` installed, trained, registered and served the synthetic fixture in about 155 s. 50 warmed requests ran at 4.0 ms p95. Removing the weights returned HTTP 503 fallback and raised `fallback_rate_high`. The served model recorded its Git commit, data version, MLflow run and registry version. |
@@ -87,4 +87,4 @@ curl -fsS -H 'Content-Type: application/octet-stream' \
 
 The saved notebook log shows **51.11% internal tuning accuracy at epoch 75** of a run configured for 80 epochs. The project uses a different holdout and release gate. The smoke and fixture results above verify the pipeline at reduced scale. A full-data project model requires a fresh training and evaluation run. [Notebook training log](notebooks/tiny-imagenet-classifier.ipynb)
 
-The release gate compares point estimates on a fixed holdout. Repeated tuning against that holdout reduces its independence. The one-slot serving design rejected 81 of 100 requests at concurrency four. The fast overall p95 includes those quick fallbacks. Feedback metrics cover the labeled subset and may be biased. The monitoring stack and notification receiver were verified locally. [Design and limitations](docs/design.md#skipped-and-incomplete-parts)
+The release gate compares point estimates on a fixed holdout. Repeated tuning against that holdout reduces its independence. The active worker allows up to three waiting requests. Saturation and deadline expiry still return HTTP 503. Feedback metrics cover the labeled subset and may be biased. The monitoring stack and notification receiver were verified locally. [Design and limitations](docs/design.md#skipped-and-incomplete-parts)

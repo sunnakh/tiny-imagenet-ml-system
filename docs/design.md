@@ -67,7 +67,7 @@ flowchart TB
 
     subgraph S5["5 · Serving · service.py"]
         API["HTTP API<br/>/predict /feedback /health"]:::done
-        FB["Fallback: HTTP 503 abstain<br/>missing, busy, timeout, error"]:::done
+        FB["Fallback: HTTP 503 abstain<br/>missing, queue full, timeout, error"]:::done
         SH["Shadow inference, async"]:::done
         LT["Smoke HTTP: serial and concurrent<br/>full-model load pending"]:::partial
     end
@@ -183,8 +183,8 @@ sequenceDiagram
         H-->>C: 400
     end
     H->>R: read active, shadow
-    H->>A: submit (non-blocking slot)
-    alt worker busy, timeout (1 s), missing or bad weights
+    H->>A: submit (one running, up to three waiting)
+    alt queue full, inference deadline expires, missing or bad weights
         A-->>H: no result
         H->>M: record mode=fallback
         H-->>C: 503 mode=fallback
@@ -201,7 +201,18 @@ sequenceDiagram
     H->>M: set label (identical retry ok, conflict rejected)
 ```
 
-The active worker checks the weights' sha256 before loading a release and caches one model in memory.
+The active worker checks the weights' sha256 before loading a release and caches one model in memory. The default one-second inference deadline includes queue wait and model execution. An expired queued request skips model execution. A running request keeps its slot until execution finishes, even when its caller has already received HTTP 503.
+
+## Bounded queue benchmark
+
+Four alternating trials used the same local 200-class smoke model and image. Each trial sent 50 sequential warmed requests and 100 warmed requests at concurrency four. The table reports the median of each trial's p95 and the total fallbacks.
+
+| Workload | Overall p95 before | Overall p95 with queue | Fallbacks before | Fallbacks with queue |
+| --- | ---: | ---: | ---: | ---: |
+| Sequential | 3.9 ms | 4.5 ms | 0 / 200 | 0 / 200 |
+| Concurrency 4 | 8.6 ms | 12.5 ms | 327 / 400 | 0 / 400 |
+
+At concurrency four, p95 for successful predictions was 8.9 ms before the change and 12.5 ms with the queue. The queue traded additional waiting latency for fewer fallbacks under this workload. The 250 ms target applies to the sequential workload.
 
 ## Release states
 
@@ -256,7 +267,7 @@ Local container verification used a synthetic release on `linux/arm64`. The `lin
 | 2 · Data pipeline | Done | Contract, quarantine, content-hashed Parquet. Full data prepared twice with byte-identical output. |
 | 3 · Training pipeline | Partial | Fixture and smoke runs registered. No full-profile model exists in `.state/full`. |
 | 4 · Evaluation gate | Done | A smoke candidate below baseline was rejected. Integration tests separately cover a baseline tie and a candidate that beats the baseline but regresses against the champion. |
-| 5 · Serving | Partial | The fixture verified shadow traffic. The 200-class smoke model met the sequential latency target and recovered after a simulated missing-weights outage. The four-way load test measured 81% fallback with one inference slot. Full-model and cloud tests are pending. |
+| 5 · Serving | Partial | The fixture verified shadow traffic. The 200-class smoke model met the sequential latency target and recovered after a simulated missing-weights outage. The bounded queue reduced fallbacks at concurrency four from 327 of 400 requests to zero in the local comparison. Full-model and cloud tests are pending. |
 | 6 · Monitoring | Partial | Prometheus scraped the smoke service and Grafana queried its provisioned data source. Alertmanager delivered firing and resolved notifications for a simulated missing-weights outage to the local webhook. A remote notification destination and cloud monitoring remain open. |
 | 7 · Release and operations | Partial | CI runs on GitHub for every pull request and every push to `main`. Dockerfile, Terraform config, shadow release and rollback exist. Cloud deploy has not run. |
 | 8 · Documentation | Done for the local demo | README, runbook, acceptance evidence, and release-gate explanation are available. The from-memory explanation and reading comparison remain open. |
@@ -268,7 +279,7 @@ Local container verification used a synthetic release on `linux/arm64`. The `lin
 | Fresh clone runs the pipeline | `make demo` on commit `80b4e31` installed, trained, registered, served, and monitored a synthetic fixture. | Local fixture |
 | Deterministic data and quarantine | Full data preparation produced byte-identical artifacts on repeat. A fixture test quarantined an injected malformed image. | Real-data preparation and fixture test |
 | Release gate blocks regressions | Integration tests reject a baseline tie and a candidate whose macro F1 regresses against the champion. The active release stays in place. | Local integration tests |
-| Latency and fallback | The 200-class smoke model served 50 sequential warmed requests at 4.8 ms p95 with zero fallbacks. Removing weights returned HTTP 503. At concurrency four, 81 of 100 requests fell back. | Local smoke release and simulated outage |
+| Latency and fallback | The smoke model met the sequential p95 target in all four trials with the queue. At concurrency four, all 400 requests completed. Removing weights still returned HTTP 503. | Local smoke release and simulated outage |
 | Monitoring and recovery | Prometheus scraped the smoke service, Grafana read its metrics, and Alertmanager sent firing and resolved notifications to the local webhook. Restoring the weights recovered active predictions. A separate integration test exercised shadow traffic, promotion, and rollback. | Local incident drill and integration test |
 | Model lineage | The fresh-clone fixture recorded its Git commit, data version, MLflow run and registry version. The older smoke release has a data version and MLflow record. Its Git commit field is empty. | Verified on the fresh-clone fixture |
 | Immutable cloud revision and teardown | Terraform initialized and validated locally. Cloud deployment, verification and teardown are deferred while cloud access is unavailable. | Local configuration verification |
